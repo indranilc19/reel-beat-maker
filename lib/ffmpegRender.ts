@@ -70,7 +70,6 @@ export async function renderReel({
   const createdFiles: string[] = [];
 
   try {
-    // Write each unique photo once.
     for (const idx of usedIndices) {
       const photo = photos[idx];
       if (!photo) throw new Error(`Photo ${idx + 1} is missing from the project.`);
@@ -81,9 +80,6 @@ export async function renderReel({
       createdFiles.push(filename);
     }
 
-    // Build the concat demuxer script. ffmpeg's concat demuxer ignores
-    // the duration on the final entry, so repeat the last file without
-    // a duration line as recommended by ffmpeg's concat documentation.
     const lines: string[] = [];
     for (const slot of cutPlan.slots) {
       const ext = extByIndex.get(slot.photoIndex);
@@ -92,7 +88,9 @@ export async function renderReel({
       lines.push(`duration ${slot.duration.toFixed(3)}`);
     }
     const lastSlot = cutPlan.slots[cutPlan.slots.length - 1];
-    lines.push(`file 'img${lastSlot.photoIndex}.${extByIndex.get(lastSlot.photoIndex)}'`);
+    const lastExt = extByIndex.get(lastSlot.photoIndex);
+    if (!lastExt) throw new Error("Invalid cut plan: last photo is missing.");
+    lines.push(`file 'img${lastSlot.photoIndex}.${lastExt}'`);
     await ffmpeg.writeFile("list.txt", lines.join("\n"));
     createdFiles.push("list.txt");
 
@@ -102,8 +100,7 @@ export async function renderReel({
     createdFiles.push(audioFilename);
 
     const vf = kenBurns
-      ? // gentle 1.0x -> 1.08x zoom per slot, cover-fit into the frame first
-        "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920," +
+      ? "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920," +
         "zoompan=z='min(zoom+0.0006,1.08)':d=125:s=1080x1920:fps=30,setsar=1"
       : "scale=1080:1920:force_original_aspect_ratio=decrease," +
         "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1";
@@ -136,9 +133,12 @@ export async function renderReel({
     }
 
     const bytes = data as Uint8Array;
-    return new Blob([bytes], { type: "video/mp4" });
+    // Copy into a real ArrayBuffer. This avoids the TS 5.x ArrayBufferLike
+    // generic incompatibility when passing FFmpeg's Uint8Array to Blob.
+    const blobBuffer = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(blobBuffer).set(bytes);
+    return new Blob([blobBuffer], { type: "video/mp4" });
   } finally {
-    // Always clean up the in-memory ffmpeg filesystem, including failed renders.
     for (const filename of [...createdFiles, "output.mp4"]) {
       await ffmpeg.deleteFile(filename).catch(() => {});
     }

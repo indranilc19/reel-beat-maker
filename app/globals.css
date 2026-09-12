@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+:root {
+  --canvas: #131319;
+  --panel: #1c1d25;
+  --panel-raised: #24252f;
+  --line: #32333e;
+  --ink: #edeef2;
+  --ink-dim: #8b8c98;
+  --pulse: #c8ff4d;
+  --action: #ff6b4a;
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-panel-raised: var(--panel-raised);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-ink-dim: var(--ink-dim);
+  --color-pulse: var(--pulse);
+  --color-action: var(--action);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains);
+}
+
+body {
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+@keyframes tick-pulse {
+  0% { transform: scaleY(1); opacity: 0.55; }
+  50% { transform: scaleY(1.9); opacity: 1; }
+  100% { transform: scaleY(1); opacity: 0.55; }
+}

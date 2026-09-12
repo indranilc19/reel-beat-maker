@@ -89,6 +89,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setAudio: (file) => {
     const prev = get().audioObjectUrl;
     if (prev) URL.revokeObjectURL(prev);
+    const previousVideoUrl = get().exportedVideoUrl;
+    if (previousVideoUrl) URL.revokeObjectURL(previousVideoUrl);
     set({
       audioFile: file,
       audioObjectUrl: URL.createObjectURL(file),
@@ -96,6 +98,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       waveformPeaks: null,
       audioDuration: null,
       cutPlan: { slots: [], totalDuration: 0, audioStartOffset: 0 },
+      isPlaying: false,
+      playbackTime: 0,
+      exportStatus: "idle",
+      exportProgress: 0,
+      exportError: null,
+      exportedVideoUrl: null,
     });
   },
 

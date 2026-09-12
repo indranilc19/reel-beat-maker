@@ -59,75 +59,89 @@ export async function renderReel({
   }
 
   const ffmpeg = await getFfmpeg();
-  if (onProgress) {
-    ffmpeg.on("progress", ({ progress }) => onProgress(Math.min(progress, 1)));
-  }
+  const progressHandler = onProgress
+    ? ({ progress }: { progress: number }) => onProgress(Math.min(progress, 1))
+    : null;
 
-  // Write each unique photo once.
+  if (progressHandler) ffmpeg.on("progress", progressHandler);
+
   const usedIndices = Array.from(new Set(cutPlan.slots.map((s) => s.photoIndex)));
   const extByIndex = new Map<number, string>();
-  for (const idx of usedIndices) {
-    const photo = photos[idx];
-    const ext = extOf(photo.file);
-    extByIndex.set(idx, ext);
-    await ffmpeg.writeFile(`img${idx}.${ext}`, await fetchFile(photo.file));
+  const createdFiles: string[] = [];
+
+  try {
+    // Write each unique photo once.
+    for (const idx of usedIndices) {
+      const photo = photos[idx];
+      if (!photo) throw new Error(`Photo ${idx + 1} is missing from the project.`);
+      const ext = extOf(photo.file);
+      extByIndex.set(idx, ext);
+      const filename = `img${idx}.${ext}`;
+      await ffmpeg.writeFile(filename, await fetchFile(photo.file));
+      createdFiles.push(filename);
+    }
+
+    // Build the concat demuxer script. ffmpeg's concat demuxer ignores
+    // the duration on the final entry, so repeat the last file without
+    // a duration line as recommended by ffmpeg's concat documentation.
+    const lines: string[] = [];
+    for (const slot of cutPlan.slots) {
+      const ext = extByIndex.get(slot.photoIndex);
+      if (!ext) throw new Error("Invalid cut plan: photo extension is missing.");
+      lines.push(`file 'img${slot.photoIndex}.${ext}'`);
+      lines.push(`duration ${slot.duration.toFixed(3)}`);
+    }
+    const lastSlot = cutPlan.slots[cutPlan.slots.length - 1];
+    lines.push(`file 'img${lastSlot.photoIndex}.${extByIndex.get(lastSlot.photoIndex)}'`);
+    await ffmpeg.writeFile("list.txt", lines.join("\n"));
+    createdFiles.push("list.txt");
+
+    const audioExt = extOf(audioFile);
+    const audioFilename = `audio.${audioExt}`;
+    await ffmpeg.writeFile(audioFilename, await fetchFile(audioFile));
+    createdFiles.push(audioFilename);
+
+    const vf = kenBurns
+      ? // gentle 1.0x -> 1.08x zoom per slot, cover-fit into the frame first
+        "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920," +
+        "zoompan=z='min(zoom+0.0006,1.08)':d=125:s=1080x1920:fps=30,setsar=1"
+      : "scale=1080:1920:force_original_aspect_ratio=decrease," +
+        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1";
+
+    const args = [
+      "-f", "concat",
+      "-safe", "0",
+      "-i", "list.txt",
+      "-ss", cutPlan.audioStartOffset.toFixed(3),
+      "-t", cutPlan.totalDuration.toFixed(3),
+      "-i", audioFilename,
+      "-vf", vf,
+      "-r", "30",
+      "-map", "0:v",
+      "-map", "1:a",
+      "-c:v", "libx264",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-shortest",
+      "-movflags", "+faststart",
+      "output.mp4",
+    ];
+
+    await ffmpeg.exec(args);
+
+    const data = await ffmpeg.readFile("output.mp4");
+    if (typeof data === "string") {
+      throw new Error("FFmpeg returned an invalid video result.");
+    }
+
+    const bytes = data as Uint8Array;
+    return new Blob([bytes], { type: "video/mp4" });
+  } finally {
+    // Always clean up the in-memory ffmpeg filesystem, including failed renders.
+    for (const filename of [...createdFiles, "output.mp4"]) {
+      await ffmpeg.deleteFile(filename).catch(() => {});
+    }
+    if (progressHandler) ffmpeg.off("progress", progressHandler);
   }
-
-  // Build the concat demuxer script. ffmpeg's concat demuxer ignores
-  // the duration on the final entry, so we repeat the last file with
-  // no duration line as the docs recommend.
-  const lines: string[] = [];
-  for (const slot of cutPlan.slots) {
-    const ext = extByIndex.get(slot.photoIndex);
-    lines.push(`file 'img${slot.photoIndex}.${ext}'`);
-    lines.push(`duration ${slot.duration.toFixed(3)}`);
-  }
-  const lastSlot = cutPlan.slots[cutPlan.slots.length - 1];
-  lines.push(`file 'img${lastSlot.photoIndex}.${extByIndex.get(lastSlot.photoIndex)}'`);
-  await ffmpeg.writeFile("list.txt", lines.join("\n"));
-
-  const audioExt = extOf(audioFile);
-  await ffmpeg.writeFile(`audio.${audioExt}`, await fetchFile(audioFile));
-
-  const vf = kenBurns
-    ? // gentle 1.0x -> 1.08x zoom per slot, cover-fit into the frame first
-      "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920," +
-      "zoompan=z='min(zoom+0.0006,1.08)':d=125:s=1080x1920:fps=30,setsar=1"
-    : "scale=1080:1920:force_original_aspect_ratio=decrease," +
-      "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1";
-
-  const args = [
-    "-f", "concat",
-    "-safe", "0",
-    "-i", "list.txt",
-    "-ss", cutPlan.audioStartOffset.toFixed(3),
-    "-t", cutPlan.totalDuration.toFixed(3),
-    "-i", `audio.${audioExt}`,
-    "-vf", vf,
-    "-r", "30",
-    "-map", "0:v",
-    "-map", "1:a",
-    "-c:v", "libx264",
-    "-pix_fmt", "yuv420p",
-    "-c:a", "aac",
-    "-b:a", "192k",
-    "-shortest",
-    "-movflags", "+faststart",
-    "output.mp4",
-  ];
-
-  await ffmpeg.exec(args);
-
-  const data = await ffmpeg.readFile("output.mp4");
-  const bytes = data as Uint8Array;
-
-  // Clean up FS for the next render.
-  for (const idx of usedIndices) {
-    await ffmpeg.deleteFile(`img${idx}.${extByIndex.get(idx)}`).catch(() => {});
-  }
-  await ffmpeg.deleteFile("list.txt").catch(() => {});
-  await ffmpeg.deleteFile(`audio.${audioExt}`).catch(() => {});
-  await ffmpeg.deleteFile("output.mp4").catch(() => {});
-
-  return new Blob([bytes.buffer as ArrayBuffer], { type: "video/mp4" });
 }
